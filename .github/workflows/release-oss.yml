@@ -54,6 +54,17 @@ jobs:
           mkdir -p target/release/osx/Rio.app/Contents/MacOS
           cp -fRp misc/osx/Rio.app target/release/osx/
           cp -fp target/${{ matrix.target }}/release/rio target/release/osx/Rio.app/Contents/MacOS/rio
+
+          # Replace GoReleaser template placeholders so the app is launchable.
+          APP_VERSION="0.0.0"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            APP_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" target/release/osx/Rio.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" target/release/osx/Rio.app/Contents/Info.plist
+
+          # Keep OSS artifact unsigned; avoid ad-hoc signatures that may be flagged by Gatekeeper.
+          codesign --remove-signature target/release/osx/Rio.app || true
           touch -r target/${{ matrix.target }}/release/rio target/release/osx/Rio.app
 
           mkdir -p dist
