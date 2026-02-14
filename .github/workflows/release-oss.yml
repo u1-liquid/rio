@@ -1,0 +1,100 @@
+name: Release OSS
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+    paths:
+      - '.github/workflows/release-oss.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-oss-${{ github.event_name }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_suffix: macos-aarch64
+          # Keep linux split packages aligned with .goreleaser.yaml IDs:
+          # linux-x64-wayland and linux-x64-x11 (both disable defaults).
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64-wayland
+            feature_args: --no-default-features --features=wayland
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64-x11
+            feature_args: --no-default-features --features=x11
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev pkg-config libfontconfig1-dev curl file
+
+      - name: Build rioterm
+        run: cargo build --release -p rioterm --target ${{ matrix.target }} ${{ matrix.feature_args }}
+
+      - name: Package macOS .app bundle
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          mkdir -p target/release/osx/Rio.app/Contents/MacOS
+          cp -fRp misc/osx/Rio.app target/release/osx/
+          cp -fp target/${{ matrix.target }}/release/rio target/release/osx/Rio.app/Contents/MacOS/rio
+          touch -r target/${{ matrix.target }}/release/rio target/release/osx/Rio.app
+
+          mkdir -p dist
+          tar -czf dist/rio-${{ github.ref_name }}-${{ matrix.artifact_suffix }}.app.tar.gz -C target/release/osx Rio.app
+
+      - name: Package Linux AppImage
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          mkdir -p dist AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/${{ matrix.target }}/release/rio AppDir/usr/bin/rio
+          cp misc/rio.desktop AppDir/usr/share/applications/rio.desktop
+          cp misc/logo.svg AppDir/usr/share/icons/hicolor/scalable/apps/rio.svg
+
+          curl -sSL -o linuxdeploy-x86_64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appimage-extract >/dev/null
+          ARCH=x86_64 ./squashfs-root/AppRun --appdir AppDir --desktop-file AppDir/usr/share/applications/rio.desktop --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/rio.svg --output appimage
+
+          mv Rio-*.AppImage dist/rio-${{ github.ref_name }}-${{ matrix.artifact_suffix }}.AppImage
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rio-${{ matrix.artifact_suffix }}
+          path: dist/*
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
